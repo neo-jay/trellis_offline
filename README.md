@@ -4,8 +4,6 @@ This release contains the TRELLIS offline code package and required inference mo
 
 ## Included assets
 
-- `trellis_offline_source.tar.gz`: curated TRELLIS source, offline startup script, OBJ export changes, and training scripts/configs. It does not contain model weights, results, logs, backups, Git history, or examples/assets unrelated to execution.
-- `TRELLIS-image-large-hf-cache.tar.part-*`: split HuggingFace cache for `JeffreyXiang/TRELLIS-image-large`.
 - `dinov2_vitl14_reg4_pretrain.pth.tar`: DINOv2 checkpoint.
 - `facebookresearch_dinov2_main.tar.gz`: local DINOv2 torch hub repository.
 - `u2net.onnx.tar`: U2Net/rembg background removal model.
