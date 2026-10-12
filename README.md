@@ -28,6 +28,8 @@ cd /root
 
 Default port: `7860`.
 
+OBJ 水密后处理的算法、额外依赖和部署变量见 [POSTPROCESSING.md](POSTPROCESSING.md)。
+
 ## Train example
 
 ```bash

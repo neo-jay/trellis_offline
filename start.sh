@@ -16,6 +16,20 @@ export TRELLIS_SERVER_PORT="${TRELLIS_SERVER_PORT:-7860}"
 export TORCH_HOME=/root/.cache/torch
 export TRELLIS_DINOV2_REPO=/root/.cache/torch/hub/facebookresearch_dinov2_main
 
+# Use an isolated environment for watertight OBJ reconstruction. The first
+# path is suitable for portable installations; the fallback matches the
+# currently verified AutoDL deployment.
+if [ -z "${TRELLIS_POSTPROCESS_PYTHON:-}" ]; then
+    if [ -x /opt/trellis-postprocess/bin/python ]; then
+        export TRELLIS_POSTPROCESS_PYTHON=/opt/trellis-postprocess/bin/python
+    elif [ -x /root/autodl-tmp/conda-envs/gggs/bin/python ]; then
+        export TRELLIS_POSTPROCESS_PYTHON=/root/autodl-tmp/conda-envs/gggs/bin/python
+    fi
+fi
+if [ -z "${TRELLIS_PYMESHLAB_PYTHONPATH:-}" ] && [ -d /root/autodl-tmp/tools/pymeshlab_py ]; then
+    export TRELLIS_PYMESHLAB_PYTHONPATH=/root/autodl-tmp/tools/pymeshlab_py
+fi
+
 test -f /root/.cache/huggingface/hub/models--JeffreyXiang--TRELLIS-image-large/refs/main || {
     echo "TRELLIS model cache is missing; run the one-time online download first." >&2
     exit 1
