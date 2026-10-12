@@ -30,6 +30,8 @@ Default port: `7860`.
 
 OBJ 水密后处理的算法、额外依赖和部署变量见 [POSTPROCESSING.md](POSTPROCESSING.md)。
 
+面向项目交接的完整算法、接口与验收文档见 [POSTPROCESSING_HANDOFF.md](POSTPROCESSING_HANDOFF.md)。
+
 ## Train example
 
 ```bash
