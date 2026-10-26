@@ -28,9 +28,7 @@ cd /root
 
 Default port: `7860`.
 
-OBJ 水密后处理的算法、额外依赖和部署变量见 [POSTPROCESSING.md](POSTPROCESSING.md)。
-
-面向项目交接的完整算法、接口与验收文档见 [POSTPROCESSING_HANDOFF.md](POSTPROCESSING_HANDOFF.md)。
+当前带贴图 OBJ 的开放边检测、分级修复、依赖及验收边界见 [OPEN_EDGE_REPAIR.md](OPEN_EDGE_REPAIR.md)。
 
 ## Train example
 

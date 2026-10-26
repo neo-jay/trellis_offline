@@ -1,8 +1,11 @@
+import os
 import torch
 from ...modules.sparse import SparseTensor
 from easydict import EasyDict as edict
 from .utils_cube import *
 from .flexicubes.flexicubes import FlexiCubes
+from .inference_quality import (inspect_mesh, defect_score, mesh_displacement,
+                                constrained_sdf_candidate)
 
 
 class MeshExtractResult:
@@ -121,18 +124,39 @@ class SparseFeatures2Mesh:
             
         x_nx3 = get_defomed_verts(self.reg_v, deform_d, self.res)
         
-        vertices, faces, L_dev, colors = self.mesh_extractor(
-            voxelgrid_vertices=x_nx3,
-            scalar_field=sdf_d,
-            cube_idx=self.reg_c,
-            resolution=self.res,
-            beta=weights_d[:, :12],
-            alpha=weights_d[:, 12:20],
-            gamma_f=weights_d[:, 20],
-            voxelgrid_colors=colors_d,
-            training=training)
+        def extract(field):
+            return self.mesh_extractor(
+                voxelgrid_vertices=x_nx3,
+                scalar_field=field,
+                cube_idx=self.reg_c,
+                resolution=self.res,
+                beta=weights_d[:, :12],
+                alpha=weights_d[:, 12:20],
+                gamma_f=weights_d[:, 20],
+                voxelgrid_colors=colors_d,
+                training=training)
+
+        vertices, faces, L_dev, colors = extract(sdf_d)
+        quality_decision = None
+        if not training and os.environ.get('TRELLIS_MESH_INFERENCE_OPT', '1') == '1':
+            baseline = inspect_mesh(vertices.detach().cpu().numpy(), faces.detach().cpu().numpy())
+            quality_decision = {'baseline': baseline, 'selected': 'baseline', 'candidates': []}
+            if defect_score(baseline) > 0:
+                for steps in (3, 6):
+                    refined_sdf = constrained_sdf_candidate(sdf_d, self.res, steps=steps)
+                    v_new, f_new, _, c_new = extract(refined_sdf)
+                    candidate = inspect_mesh(v_new.detach().cpu().numpy(), f_new.detach().cpu().numpy())
+                    displacement = mesh_displacement(vertices.detach().cpu().numpy(), v_new.detach().cpu().numpy())
+                    candidate['displacement_95_relative'] = displacement
+                    quality_decision['candidates'].append({'steps': steps, **candidate})
+                    if displacement <= 0.01 and defect_score(candidate) < defect_score(baseline):
+                        vertices, faces, colors = v_new, f_new, c_new
+                        baseline = candidate
+                        quality_decision['selected'] = f'bounded_sdf_diffusion_{steps}'
+            quality_decision['final'] = baseline
         
         mesh = MeshExtractResult(vertices=vertices, faces=faces, vertex_attrs=colors, res=self.res)
+        mesh.quality_decision = quality_decision
         if training:
             if mesh.success:
                 reg_loss += L_dev.mean() * 0.5

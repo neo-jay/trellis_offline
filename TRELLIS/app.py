@@ -5,23 +5,23 @@ import os
 import sys
 import shutil
 import zipfile
-import subprocess
+import json
 from typing import *
 import torch
 import numpy as np
 import imageio
 import trimesh
-from trimesh.exchange.obj import export_obj
 from easydict import EasyDict as edict
 from PIL import Image
 from trellis.pipelines import TrellisImageTo3DPipeline
 from trellis.representations import Gaussian, MeshExtractResult
 from trellis.utils import render_utils, postprocessing_utils
+from trellis.utils.obj_topology_export import export_obj_shared_geometry, close_obj_geometry
+from trellis.representations.mesh.inference_quality import inspect_mesh
 
 
 MAX_SEED = np.iinfo(np.int32).max
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-TMP_DIR = os.path.join(APP_DIR, 'tmp')
+TMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tmp')
 os.makedirs(TMP_DIR, exist_ok=True)
 
 
@@ -57,7 +57,7 @@ def start_session(req: gr.Request):
     
 def end_session(req: gr.Request):
     user_dir = os.path.join(TMP_DIR, str(req.session_hash))
-    shutil.rmtree(user_dir)
+    shutil.rmtree(user_dir, ignore_errors=True)
 
 
 def preprocess_image(image: Image.Image) -> Image.Image:
@@ -104,6 +104,19 @@ def pack_state(gs: Gaussian, mesh: MeshExtractResult) -> dict:
             'faces': mesh.faces.cpu().numpy(),
         },
     }
+
+
+def quality_summary(report: dict) -> str:
+    """Show only final OBJ defect counts; keep detailed diagnostics on disk."""
+    export = report.get('exported_obj')
+    if not export:
+        return ''
+    return (
+        f"开放边：**{export['boundary_edges']}**　"
+        f"孔洞：**{export['boundary_loops']}**　"
+        f"非闭合区域：**{export['nonclosed_regions']}**　"
+        f"局部拓扑异常：**{export['local_topology_anomalies']}**"
+    )
     
     
 def unpack_state(state: dict) -> Tuple[Gaussian, edict, str]:
@@ -167,6 +180,10 @@ def image_to_3d(
         str: The path to the video of the 3D model.
     """
     user_dir = os.path.join(TMP_DIR, str(req.session_hash))
+    os.makedirs(user_dir, exist_ok=True)
+    seed = int(seed)
+    ss_sampling_steps = int(ss_sampling_steps)
+    slat_sampling_steps = int(slat_sampling_steps)
     if not is_multiimage:
         outputs = pipeline.run(
             image,
@@ -204,17 +221,19 @@ def image_to_3d(
     video_path = os.path.join(user_dir, 'sample.mp4')
     imageio.mimsave(video_path, video, fps=15)
     state = pack_state(outputs['gaussian'][0], outputs['mesh'][0])
+    decision = getattr(outputs['mesh'][0], 'quality_decision', None)
+    raw_quality = inspect_mesh(state['mesh']['vertices'], state['mesh']['faces'])
+    state['quality'] = {'stage': '原始网格提取', 'mesh': raw_quality, 'inference_optimization': decision}
     torch.cuda.empty_cache()
-    return state, video_path
+    return state, video_path, ''
 
 
 def extract_obj(
     state: dict,
     mesh_simplify: float,
     texture_size: int,
-    repair_quality: str,
     req: gr.Request,
-) -> Tuple[str, str]:
+) -> Tuple[str, str, dict]:
     """
     Extract an OBJ model package from the 3D model.
 
@@ -228,6 +247,8 @@ def extract_obj(
         str: The path to a ZIP containing OBJ, MTL, and texture files.
     """
     user_dir = os.path.join(TMP_DIR, str(req.session_hash))
+    os.makedirs(user_dir, exist_ok=True)
+    texture_size = int(texture_size)
     gs, mesh = unpack_state(state)
 
     # Keep the existing GLB generation pipeline, then convert the generated
@@ -237,19 +258,16 @@ def extract_obj(
     glb.export(glb_path)
 
     converted_mesh = trimesh.load(glb_path, force='mesh')
-    obj_text, sidecar_files = export_obj(
-        converted_mesh,
-        include_normals=True,
-        include_texture=True,
-        return_texture=True,
-        mtl_name='sample.mtl',
-    )
+    obj_text, sidecar_files, obj_vertices, obj_faces = export_obj_shared_geometry(
+        converted_mesh, mtl_name='sample.mtl')
+    obj_text, obj_vertices, obj_faces, repair_info = close_obj_geometry(
+        converted_mesh, obj_text, obj_vertices, obj_faces)
 
-    source_obj_path = os.path.join(user_dir, 'sample_source.obj')
-    with open(source_obj_path, 'w', encoding='utf-8') as f:
+    obj_path = os.path.join(user_dir, 'sample.obj')
+    with open(obj_path, 'w', encoding='utf-8') as f:
         f.write(obj_text)
 
-    package_files = []
+    package_files = [obj_path]
     for filename, content in sidecar_files.items():
         sidecar_path = os.path.join(user_dir, os.path.basename(filename))
         mode = 'wb' if isinstance(content, bytes) else 'w'
@@ -258,53 +276,16 @@ def extract_obj(
             f.write(content)
         package_files.append(sidecar_path)
 
-    # Reconstruct a smooth watertight surface without a fixed voxel grid,
-    # then create a fresh UV atlas and bake the original texture into it.
-    repair_dir = os.path.join(user_dir, 'watertight_obj')
-    shutil.rmtree(repair_dir, ignore_errors=True)
-    os.makedirs(repair_dir, exist_ok=True)
-    del gs, mesh, glb
-    torch.cuda.empty_cache()
-    repair_env = os.environ.copy()
-    pymeshlab_path = repair_env.get('TRELLIS_PYMESHLAB_PYTHONPATH', '')
-    if pymeshlab_path:
-        repair_env['PYTHONPATH'] = pymeshlab_path + (
-            os.pathsep + repair_env['PYTHONPATH'] if repair_env.get('PYTHONPATH') else ''
-        )
-    repair_python = repair_env.get('TRELLIS_POSTPROCESS_PYTHON', sys.executable)
-    repair_script = os.path.join(APP_DIR, 'trellis', 'utils', 'poisson_textured_repair.py')
-    command = [
-        repair_python,
-        repair_script,
-        source_obj_path,
-        repair_dir,
-        '--texture-size',
-        str(int(texture_size)),
-        '--quality',
-        repair_quality,
-    ]
-    try:
-        completed = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=900,
-            env=repair_env,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError('水密重建超过 15 分钟，请选择“平衡”质量后重试。') from exc
-    except (subprocess.CalledProcessError, OSError) as exc:
-        stderr = getattr(exc, 'stderr', None)
-        stdout = getattr(exc, 'stdout', None)
-        details = stderr or stdout or str(exc)
-        raise RuntimeError('OBJ水密重建失败：' + details[-4000:]) from exc
-    print('OBJ watertight repair:', completed.stdout, flush=True)
-    package_files = [
-        os.path.join(repair_dir, 'sample.obj'),
-        os.path.join(repair_dir, 'sample.mtl'),
-        os.path.join(repair_dir, 'material_0.png'),
-    ]
+    export_quality = inspect_mesh(obj_vertices, obj_faces)
+    quality_report = {
+        'raw_mesh': state.get('quality', {}),
+        'exported_obj': export_quality,
+        'obj_repair': repair_info,
+        'note': '已屏蔽自定义 Poisson 后处理；保留 TRELLIS 原有简化、补洞和贴图烘焙。自相交尚未检测，闭合边界不等于完整拓扑保证。',
+    }
+    report_path = os.path.join(user_dir, 'mesh_quality.json')
+    with open(report_path, 'w', encoding='utf-8') as f:
+        json.dump(quality_report, f, ensure_ascii=False, indent=2)
 
     zip_path = os.path.join(user_dir, 'sample_obj_package.zip')
     with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
@@ -315,7 +296,7 @@ def extract_obj(
     # LitModel3D can accept OBJ, but browsers do not reliably fetch its
     # external MTL and texture files through Gradio. Preview the identical
     # internal GLB while keeping the downloadable deliverable as OBJ.
-    return glb_path, zip_path
+    return glb_path, zip_path, quality_summary(quality_report)
 
 
 def extract_gaussian(state: dict, req: gr.Request) -> Tuple[str, str]:
@@ -370,14 +351,10 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             generate_btn = gr.Button("生成3D模型")
             
             with gr.Accordion(label="OBJ导出设置", open=False):
-                mesh_simplify = gr.Slider(0.9, 0.98, label="网格简化比例", value=0.95, step=0.01)
+                mesh_simplify = gr.Slider(
+                    0.6, 0.98, label="删除三角面比例", value=0.95, step=0.01,
+                    info="数值越小保留的网格细节越多，但有时也会留下更多真实开放边；导出后请查看质量检测。")
                 texture_size = gr.Slider(512, 2048, label="纹理尺寸", value=1024, step=512)
-                repair_quality = gr.Radio(
-                    [("平衡（推荐）", "balanced"), ("高质量", "high")],
-                    label="水密表面重建质量",
-                    value="balanced",
-                    info="使用平滑 Poisson 重建并重新烘焙纹理；高质量模式耗时更长。",
-                )
             
             with gr.Row():
                 extract_obj_btn = gr.Button("导出OBJ模型", interactive=False)
@@ -388,6 +365,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
 
         with gr.Column():
             video_output = gr.Video(label="生成的3D模型", autoplay=True, loop=True, height=300)
+            quality_output = gr.Markdown(label="模型质量检测")
             model_output = LitModel3D(
                 label="导出的OBJ/高斯模型",
                 exposure=10.0,
@@ -438,7 +416,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
     ).then(
         image_to_3d,
         inputs=[image_prompt, multiimage_prompt, is_multiimage, seed, ss_guidance_strength, ss_sampling_steps, slat_guidance_strength, slat_sampling_steps, multiimage_algo],
-        outputs=[output_buf, video_output],
+        outputs=[output_buf, video_output, quality_output],
     ).then(
         lambda: tuple([gr.Button(interactive=True), gr.Button(interactive=True)]),
         outputs=[extract_obj_btn, extract_gs_btn],
@@ -451,8 +429,8 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
 
     extract_obj_btn.click(
         extract_obj,
-        inputs=[output_buf, mesh_simplify, texture_size, repair_quality],
-        outputs=[model_output, download_obj],
+        inputs=[output_buf, mesh_simplify, texture_size],
+        outputs=[model_output, download_obj, quality_output],
     ).then(
         lambda: gr.Button(interactive=True),
         outputs=[download_obj],
