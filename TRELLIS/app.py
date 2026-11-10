@@ -6,6 +6,7 @@ import sys
 import shutil
 import zipfile
 import json
+import uuid
 from typing import *
 import torch
 import numpy as np
@@ -35,7 +36,7 @@ PAGE_JS = r"""
         if (!previewDownload) return;
 
         const filename = (previewDownload.getAttribute('download') || '').toLowerCase();
-        if (!filename.endsWith('.glb')) return;
+        if (!filename.endsWith('.obj')) return;
 
         const packageDownload =
             document.querySelector('#obj_package_download a[href]') ||
@@ -293,10 +294,16 @@ def extract_obj(
             archive.write(file_path, arcname=os.path.basename(file_path))
 
     torch.cuda.empty_cache()
-    # LitModel3D can accept OBJ, but browsers do not reliably fetch its
-    # external MTL and texture files through Gradio. Preview the identical
-    # internal GLB while keeping the downloadable deliverable as OBJ.
-    return glb_path, zip_path, quality_summary(quality_report)
+    # Gradio caches component outputs separately. Keep the OBJ, MTL and texture
+    # together in its served cache so the browser can resolve relative paths.
+    preview_dir = os.path.join(
+        model_output.GRADIO_CACHE, 'trellis_obj', str(req.session_hash), uuid.uuid4().hex)
+    os.makedirs(preview_dir, exist_ok=True)
+    for file_path in package_files:
+        preview_file = os.path.join(preview_dir, os.path.basename(file_path))
+        shutil.copy2(file_path, preview_file)
+        model_output.temp_files.add(preview_file)
+    return os.path.join(preview_dir, 'sample.obj'), zip_path, quality_summary(quality_report)
 
 
 def extract_gaussian(state: dict, req: gr.Request) -> Tuple[str, str]:
