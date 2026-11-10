@@ -150,6 +150,14 @@ def get_seed(randomize_seed: bool, seed: int) -> int:
     return np.random.randint(0, MAX_SEED) if randomize_seed else seed
 
 
+def clear_previous_result():
+    """Discard the old preview and export state before another generation."""
+    return (
+        None, None, None, None, '', None,
+        gr.Button(interactive=False), gr.Button(interactive=False),
+    )
+
+
 def image_to_3d(
     image: Image.Image,
     multiimages: List[Tuple[Image.Image, str]],
@@ -425,14 +433,26 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         preprocess_image,
         inputs=[image_prompt],
         outputs=[image_prompt],
+    ).then(
+        clear_previous_result,
+        outputs=[model_output, download_obj, download_gs, video_output,
+                 quality_output, output_buf, extract_obj_btn, extract_gs_btn],
     )
     multiimage_prompt.upload(
         preprocess_images,
         inputs=[multiimage_prompt],
         outputs=[multiimage_prompt],
+    ).then(
+        clear_previous_result,
+        outputs=[model_output, download_obj, download_gs, video_output,
+                 quality_output, output_buf, extract_obj_btn, extract_gs_btn],
     )
 
     generate_btn.click(
+        clear_previous_result,
+        outputs=[model_output, download_obj, download_gs, video_output,
+                 quality_output, output_buf, extract_obj_btn, extract_gs_btn],
+    ).then(
         get_seed,
         inputs=[randomize_seed, seed],
         outputs=[seed],
