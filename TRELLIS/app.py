@@ -301,7 +301,23 @@ def extract_obj(
     os.makedirs(preview_dir, exist_ok=True)
     for file_path in package_files:
         preview_file = os.path.join(preview_dir, os.path.basename(file_path))
-        shutil.copy2(file_path, preview_file)
+        if file_path == obj_path:
+            # This viewer's Babylon OBJ loader enables vertex colors but fails
+            # on v/vt/vn faces. Use equivalent v/vt faces and neutral colors in
+            # the preview copy only; the downloadable OBJ stays untouched.
+            with open(file_path, 'r', encoding='utf-8') as source, \
+                    open(preview_file, 'w', encoding='utf-8') as target:
+                for line in source:
+                    if line.startswith('v ') and len(line.split()) == 4:
+                        line = line.rstrip('\r\n') + ' 1 1 1\n'
+                    elif line.startswith('f '):
+                        line = 'f ' + ' '.join(
+                            '/'.join(vertex.split('/')[:2])
+                            for vertex in line.split()[1:]
+                        ) + '\n'
+                    target.write(line)
+        else:
+            shutil.copy2(file_path, preview_file)
         model_output.temp_files.add(preview_file)
     return os.path.join(preview_dir, 'sample.obj'), zip_path, quality_summary(quality_report)
 
@@ -375,7 +391,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             quality_output = gr.Markdown(label="模型质量检测")
             model_output = LitModel3D(
                 label="导出的OBJ/高斯模型",
-                exposure=10.0,
+                exposure=1.0,
                 height=300,
                 elem_id="obj_model_viewer",
             )
