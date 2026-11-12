@@ -1,5 +1,6 @@
 import gradio as gr
 from gradio_litmodel3d import LitModel3D
+from gradio.processing_utils import get_upload_folder
 
 import os
 import sys
@@ -151,10 +152,22 @@ def get_seed(randomize_seed: bool, seed: int) -> int:
 
 
 def clear_previous_result():
-    """Discard the old preview and export state before another generation."""
+    """Unmount the old viewer and discard exports before another generation."""
     return (
-        None, None, None, None, '', None,
+        None,
+        gr.DownloadButton(value=None, interactive=False),
+        gr.DownloadButton(value=None, interactive=False),
+        None, '', None,
         gr.Button(interactive=False), gr.Button(interactive=False),
+    )
+
+
+def clear_export_preview():
+    """Unmount the old viewer before starting a new export."""
+    return (
+        None,
+        gr.DownloadButton(value=None, interactive=False),
+        gr.DownloadButton(value=None, interactive=False),
     )
 
 
@@ -305,7 +318,7 @@ def extract_obj(
     # Gradio caches component outputs separately. Keep the OBJ, MTL and texture
     # together in its served cache so the browser can resolve relative paths.
     preview_dir = os.path.join(
-        model_output.GRADIO_CACHE, 'trellis_obj', str(req.session_hash), uuid.uuid4().hex)
+        get_upload_folder(), 'trellis_obj', str(req.session_hash), uuid.uuid4().hex)
     os.makedirs(preview_dir, exist_ok=True)
     for file_path in package_files:
         preview_file = os.path.join(preview_dir, os.path.basename(file_path))
@@ -326,7 +339,6 @@ def extract_obj(
                     target.write(line)
         else:
             shutil.copy2(file_path, preview_file)
-        model_output.temp_files.add(preview_file)
     return os.path.join(preview_dir, 'sample.obj'), zip_path, quality_summary(quality_report)
 
 
@@ -349,6 +361,9 @@ def extract_gaussian(state: dict, req: gr.Request) -> Tuple[str, str]:
 
 
 with gr.Blocks(delete_cache=(600, 600)) as demo:
+    preview_path_state = gr.State(None)
+    # Register the third-party component's frontend assets for gr.render.
+    LitModel3D(value=None, visible=False, elem_id='preview_asset_bootstrap')
     with gr.Row():
         with gr.Column():
             with gr.Tabs() as input_tabs:
@@ -383,7 +398,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
             
             with gr.Accordion(label="OBJ导出设置", open=False):
                 mesh_simplify = gr.Slider(
-                    0.6, 0.98, label="删除三角面比例", value=0.95, step=0.01,
+                    0.6, 0.98, label="删除三角面比例", value=0.8, step=0.01,
                     info="数值越小保留的网格细节越多，但有时也会留下更多真实开放边；导出后请查看质量检测。")
                 texture_size = gr.Slider(512, 2048, label="纹理尺寸", value=1024, step=512)
             
@@ -397,12 +412,18 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         with gr.Column():
             video_output = gr.Video(label="生成的3D模型", autoplay=True, loop=True, height=300)
             quality_output = gr.Markdown(label="模型质量检测")
-            model_output = LitModel3D(
-                label="导出的OBJ/高斯模型",
-                exposure=1.0,
-                height=300,
-                elem_id="obj_model_viewer",
-            )
+            @gr.render(inputs=preview_path_state, queue=False)
+            def render_model_preview(preview_path):
+                # A new component key forces the Babylon scene to be disposed.
+                # Merely updating the file in one viewer can leave old meshes.
+                LitModel3D(
+                    value=preview_path,
+                    key=preview_path or 'empty_preview',
+                    label="导出的OBJ/高斯模型",
+                    exposure=1.0,
+                    height=300,
+                    elem_id="obj_model_viewer",
+                )
             
             with gr.Row():
                 download_obj = gr.DownloadButton(
@@ -435,7 +456,7 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         outputs=[image_prompt],
     ).then(
         clear_previous_result,
-        outputs=[model_output, download_obj, download_gs, video_output,
+        outputs=[preview_path_state, download_obj, download_gs, video_output,
                  quality_output, output_buf, extract_obj_btn, extract_gs_btn],
     )
     multiimage_prompt.upload(
@@ -444,13 +465,13 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
         outputs=[multiimage_prompt],
     ).then(
         clear_previous_result,
-        outputs=[model_output, download_obj, download_gs, video_output,
+        outputs=[preview_path_state, download_obj, download_gs, video_output,
                  quality_output, output_buf, extract_obj_btn, extract_gs_btn],
     )
 
     generate_btn.click(
         clear_previous_result,
-        outputs=[model_output, download_obj, download_gs, video_output,
+        outputs=[preview_path_state, download_obj, download_gs, video_output,
                  quality_output, output_buf, extract_obj_btn, extract_gs_btn],
     ).then(
         get_seed,
@@ -471,28 +492,30 @@ with gr.Blocks(delete_cache=(600, 600)) as demo:
     )
 
     extract_obj_btn.click(
+        clear_export_preview,
+        outputs=[preview_path_state, download_obj, download_gs],
+        queue=False,
+    ).then(
         extract_obj,
         inputs=[output_buf, mesh_simplify, texture_size],
-        outputs=[model_output, download_obj, quality_output],
+        outputs=[preview_path_state, download_obj, quality_output],
     ).then(
-        lambda: gr.Button(interactive=True),
+        lambda: gr.DownloadButton(interactive=True),
         outputs=[download_obj],
     )
     
     extract_gs_btn.click(
+        clear_export_preview,
+        outputs=[preview_path_state, download_obj, download_gs],
+        queue=False,
+    ).then(
         extract_gaussian,
         inputs=[output_buf],
-        outputs=[model_output, download_gs],
+        outputs=[preview_path_state, download_gs],
     ).then(
-        lambda: gr.Button(interactive=True),
+        lambda: gr.DownloadButton(interactive=True),
         outputs=[download_gs],
     )
-
-    model_output.clear(
-        lambda: gr.Button(interactive=False),
-        outputs=[download_obj],
-    )
-    
 
 # Launch the Gradio app
 if __name__ == "__main__":
