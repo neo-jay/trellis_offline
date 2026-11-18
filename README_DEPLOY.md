@@ -79,9 +79,75 @@ TRELLIS_PYTHON=~/miniconda3/bin/python ./start.sh
 | `start.sh` | — | ✅ |
 | `check_env.sh` | — | ✅ |
 | `SHA256SUMS.txt` | — | 建议 |
-| `README_RELEASE.md` | — | 说明 |
+| `README_DEPLOY.md` | — | 说明 |
 
-**分卷必须两段都下载，并按 part-00、part-01 顺序拼接**（脚本会自动做）。
+### ⚠️ 不要下载页面的 "Source code"
+
+GitHub 页面最下方自动生成的 **Source code (zip)** / **Source code (tar.gz)**：
+
+- **不含任何模型权重**，只有 git 仓库快照
+- 且指向旧 tag，代码与本次交付版本不一致
+
+**只下载上方 Assets 列表里的 11 个文件。**
+
+### 为什么模型要切成两片
+
+GitHub Release **单个文件上限 2 GB**，而 TRELLIS 主模型打包后约 **2.9 GB**，因此拆成两片：
+
+| 文件 | 大小 | 内容 |
+| --- | ---: | --- |
+| `TRELLIS-image-large-hf-cache.tar.part-00` | 1992 MB | 同一个 tar 的前半段 |
+| `TRELLIS-image-large-hf-cache.tar.part-01` | 1015 MB | 同一个 tar 的后半段 |
+| 合计 | 2.83 GB | 拼接后才是完整归档 |
+
+**两片必须全部下载**，缺任何一片都会导致解压失败（`tar: Unexpected EOF in archive`）。
+
+### 部署脚本会自动拼接，无需手动操作
+
+`restore_offline_assets.sh` 内部的逻辑：
+
+```bash
+PARTS=( "$ASSET_DIR"/TRELLIS-image-large-hf-cache.tar.part-* )   # 按名字排序
+JOINED="$(mktemp "${TMPDIR:-/tmp}/hf-cache.XXXXXX.tar")"
+cat "${PARTS[@]}" > "$JOINED"                                    # 拼成完整 tar
+tar -xf "$JOINED" -C "$HF_CACHE"                                 # 解压到 HF 缓存
+rm -f "$JOINED"                                                  # 删除临时文件
+```
+
+你只需把 11 个文件放在同一目录并执行：
+
+```bash
+./restore_offline_assets.sh
+```
+
+**三个注意点：**
+
+1. **不要改文件名**。脚本靠 `part-*` 通配符匹配并按字典序拼接，改名会导致找不到或顺序错误。
+2. **拼接需要约 2.9 GB 临时空间**，默认使用 `/tmp`。若 `/tmp` 空间不足，请指定其他位置：
+   ```bash
+   TMPDIR=/data/tmp ./restore_offline_assets.sh
+   ```
+3. **`SHA256SUMS.txt` 记录的是两片各自的哈希**，不是拼接后的。所以 `--verify` 校验的是分片完整性；两片都对，拼出来必然完整。
+
+### 手动拼接（仅在脚本异常时使用）
+
+```bash
+cd ~/trellis-setup
+
+# 1. 按顺序拼接
+cat TRELLIS-image-large-hf-cache.tar.part-00 \
+    TRELLIS-image-large-hf-cache.tar.part-01 > hf.tar
+
+# 2. 解压到 HF 缓存目录
+mkdir -p ~/trellis/.cache/huggingface/hub
+tar -xf hf.tar -C ~/trellis/.cache/huggingface/hub
+
+# 3. 清理临时文件
+rm hf.tar
+
+# 4. 确认模型就位（有输出即成功）
+ls ~/trellis/.cache/huggingface/hub/models--JeffreyXiang--TRELLIS-image-large/refs/main
+```
 
 ## 四、部署后的目录结构
 
