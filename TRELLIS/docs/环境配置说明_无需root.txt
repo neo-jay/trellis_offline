@@ -1,0 +1,372 @@
+TRELLIS 语义尺寸调整 —— 新环境配置说明（无需 root 权限）
+================================================================
+
+版本: 1.0
+日期: 2026-11-27
+适用: 单图目标重建 + 三维模型语义尺寸调整（命令行接口）
+
+本文件说明如何在一台干净机器上从零配置运行环境。
+全部步骤均以普通用户身份完成，不需要 root / sudo。
+
+【重要】本版只使用 **一个** conda 环境，两个入口（重建、语义调整）
+都在同一环境下运行。使用者不需要手动切换环境。
+
+
+================================================================
+0. 重要前提：为什么要避免 root
+================================================================
+
+上一版交付包要求把仓库放到 /root 下，且部分脚本以 #!/root/miniconda3/bin/python
+作为 shebang，导致甲方必须在镜像里开放 root 才能运行。这是本版必须纠正的问题。
+
+本版的设计原则：
+
+  * 所有路径都可通过环境变量覆盖，不存在必须写死的绝对路径
+  * 安装目录由使用者自选（示例用 $HOME/trellis）
+  * 运行时不写系统目录（/usr、/etc、/opt 一律不碰）
+  * 不执行 apt / yum / 系统级包管理器
+  * 不需要 chown、chmod 系统文件、不需要 systemd
+
+若按本文件操作仍然出现权限错误，说明漏了某处 sudo 依赖，请记录并反馈，
+不要用 sudo 绕过。
+
+
+================================================================
+1. 硬件与系统要求
+================================================================
+
+  操作系统   Ubuntu 20.04 / 22.04 (x86_64)
+  Python     3.10.x（两个环境都用 3.10，便于复用 wheel）
+  GPU        NVIDIA，显存 >= 24 GB；驱动需支持 CUDA 12.1 或 12.4
+  CPU 内存   >= 16 GB（建议 32 GB）
+  磁盘       安装约 35 GB（含两个 conda 环境与模型权重）
+             + 每次任务输出 20–100 MB
+
+检查驱动支持的 CUDA 版本：
+
+    nvidia-smi                    # 右上角显示 "CUDA Version: 12.x"
+
+注意：驱动只能向下兼容。若驱动显示 12.2，则不能装 cu124 的 torch，
+      应改用 cu121。两个环境的 CUDA 版本要求见第 3、4 节。
+
+
+================================================================
+2. 安装 Conda（用户级，不需要 root）
+================================================================
+
+推荐 Miniforge（自带 conda-forge 通道，无 Anaconda 商用许可问题）：
+
+    cd $HOME
+    curl -LO https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
+    bash Miniforge3-Linux-x86_64.sh -b -p $HOME/miniforge3
+
+    # 激活（写入当前 shell，不修改系统文件）
+    source $HOME/miniforge3/etc/profile.d/conda.sh
+
+    # 建议把这一行加入 ~/.bashrc，之后新开终端自动可用
+    echo 'source $HOME/miniforge3/etc/profile.d/conda.sh' >> ~/.bashrc
+
+验证：
+
+    conda --version          # 应输出 conda 23.x 以上
+
+内存紧张时的替代方案：若 conda 求解器因内存不足被 OOM kill，
+改用 micromamba（体积更小、求解更快），命令与 conda 基本兼容：
+
+    curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj bin/micromamba
+    export MAMBA_ROOT_PREFIX=$HOME/micromamba
+    ./bin/micromamba create -y -p $HOME/envs/build python=3.10 -c conda-forge
+
+
+================================================================
+3. 唯一的运行环境（两个入口共用）
+================================================================
+
+本版把重建与语义调整合并到同一环境，原因：
+
+  * 语义调整的主链路只依赖 numpy / trimesh / scipy / pymeshlab，
+    这些在重建环境里本来就有或很容易补
+  * 只有“重新用 PartField 计算分割”才需要 torch 2.4 + torch_scatter，
+    而日常编辑读取预计算结果，不需要它们
+  * 两套 torch 并存会让交付复杂化，且容易因 pip 解析依赖互相破坏
+
+================================================================
+3.1 创建环境
+================================================================
+
+    conda create -y -n trellis python=3.10
+    conda activate trellis
+
+================================================================
+3.2 安装 PyTorch（必须最先，且不要被后续步骤改动）
+================================================================
+
+    pip install torch==2.1.2 torchvision==0.16.2 \
+        --index-url https://download.pytorch.org/whl/cu121
+
+注意版本配对，装错会报 operator torchvision::nms does not exist：
+    torch 2.1.2  <->  torchvision 0.16.2
+    torch 2.4.0  <->  torchvision 0.19.0
+
+================================================================
+3.3 重建所需的 CUDA 扩展
+================================================================
+
+这几个包与 GPU 架构相关，见第 6 节。
+
+    pip install spconv-cu120==2.3.6
+    pip install flash-attn==2.7.2.post1 --no-build-isolation
+    pip install nvdiffrast==0.3.3
+    pip install kaolin==0.17.0
+    pip install xatlas==0.0.9
+
+================================================================
+3.4 语义调整所需的额外依赖
+================================================================
+
+与重建相比，语义调整只多需要一个自相交检测库：
+
+    pip install --no-deps pymeshlab
+
+必须加 --no-deps。pymeshlab 会声明对较新 numpy 的依赖，而本项目
+要求 numpy 1.26.x；让它自由解析会把 numpy 升级，破坏 trimesh 与其他组件。
+
+================================================================
+3.5 通用依赖
+================================================================
+
+    pip install -r requirements.txt
+
+requirements.txt 内容见本包内同名文件。核心是：
+    numpy==1.26.3  scipy==1.14.1  trimesh==4.5.3  pymeshfix==0.17.0
+    pillow  opencv-python-headless  rembg  imageio  imageio-ffmpeg
+    einops  easydict  tqdm  rich  matplotlib
+    huggingface-hub  transformers  safetensors
+
+================================================================
+3.6 版本锁定检查（安装后必做）
+================================================================
+
+    python -c "import torch,torchvision;print(torch.__version__,torchvision.__version__)"
+    # 期望：2.1.2+cu121 0.16.2+cu121
+
+    python -c "import numpy;print(numpy.__version__)"
+    # 期望：1.26.3（若变成 2.x，trimesh/pymeshlab 可能报错）
+
+    python -c "import setuptools;print(setuptools.__version__)"
+    # 若将来需要用 lightning 2.2，需 < 81
+
+若发现版本被改动，按 3.2 重新装 torch，按 3.5 重新装 numpy。
+
+================================================================
+5. 系统库缺失的处理（不装到系统目录）
+================================================================
+
+open3d / vtk 依赖 libGL、libEGL、libxrender。若报错：
+
+    ImportError: libEGL.so.1: cannot open shared object file
+
+有两种不需要 root 的解决方式：
+
+方式一（推荐）：用 conda 在环境内装，库只在当前环境生效：
+
+    conda install -y -c conda-forge libglvnd libglu xorg-libxrender xorg-libx11
+
+方式二：若确实要装到系统（需要管理员配合），应请甲方管理员执行：
+
+    sudo apt install libgl1 libegl1 libxrender1 libx11-6
+
+不要尝试用 sudo 自己装；本程序不要求这一步，方式一足够。
+
+
+================================================================
+6. CUDA 扩展与 GPU 架构（重要）
+================================================================
+
+flash-attn 的预编译包只覆盖部分架构：
+
+    A100 / A800 (sm_80)   可用
+    H100 / H800 (sm_90)   可用
+    RTX 3090 / 4090 (sm_86/89)   通常可用，走 PTX 回退
+    V100 (sm_70) / T4 (sm_75)    很可能失败
+
+若目标机是 V100 或 T4，必须在目标机上重新编译：
+
+    pip install flash-attn==2.7.2.post1 --no-build-isolation
+
+编译需要该环境内有 nvcc 与 ninja：
+
+    conda install -y -c conda-forge cuda-nvcc=12.1 ninja
+
+编译耗时约 1–2 小时，且需要足够的 CPU 内存（建议 8 GB 以上空闲）。
+
+spconv 有 cu118 / cu120 两个变体，按重建环境的 CUDA 版本选择：
+    CUDA 12.1 -> spconv-cu120
+    CUDA 11.8 -> spconv-cu118
+
+
+================================================================
+7. 模型权重放置
+================================================================
+
+权重不随代码走，需单独获取。放置后由程序自动探测，不需要改代码。
+
+重建环境需要（约 4.3 GB）：
+
+    $HOME/.cache/huggingface/hub/models--JeffreyXiang--TRELLIS-image-large/
+    $HOME/.cache/torch/hub/checkpoints/dinov2_vitl14_reg4_pretrain.pth
+    $HOME/.cache/torch/hub/facebookresearch_dinov2_main/
+    $HOME/.u2net/u2net.onnx
+
+语义调整环境需要（约 1.2 GB）：
+
+    PartField 的 model_objaverse.ckpt
+    该权重仅供语义调整环境在需要重新计算分割时使用；若已有预计算
+    分割结果（见 TRELLIS_PARTFIELD_RESULTS），日常编辑不需要它
+
+可用环境变量显式指定缓存位置（推荐，避免依赖默认路径）：
+
+    export HF_HOME=$HOME/.cache/huggingface
+    export TORCH_HOME=$HOME/.cache/torch
+    export U2NET_HOME=$HOME/.u2net
+
+
+================================================================
+8. 代码放置与环境变量
+================================================================
+
+代码目录可放在任意位置，示例：
+
+    mkdir -p $HOME/projects
+    cd $HOME/projects
+    tar -xzf trellis_source.tar.gz
+    # 得到 $HOME/projects/TRELLIS
+
+不需要 chmod、不需要 chown、不需要写 /usr/local。
+
+可选环境变量（都有默认值，不设也能跑）：
+
+    TRELLIS_PARTFIELD_RESULTS   PartField 预计算分割结果目录
+                                默认: 与代码目录同级的 PartField/exp_results
+    TRELLIS_PHOTO_PYTHON        照片方向配准的子进程解释器
+                                默认: 当前运行的解释器（sys.executable）
+    TRELLIS_PHOTO_DIRECTION_CACHE  照片方向缓存目录
+                                默认: 系统临时目录下 trellis_photo_direction
+
+建议在 ~/.bashrc 中固定下来，避免每次手动设置：
+
+    export TRELLIS_PARTFIELD_RESULTS=$HOME/projects/PartField/exp_results
+    export HF_HOME=$HOME/.cache/huggingface
+    export TORCH_HOME=$HOME/.cache/torch
+
+
+================================================================
+9. 两个入口在同一环境下运行
+================================================================
+
+不需要切换环境。激活一次，两个入口都能用：
+
+    conda activate trellis
+
+    # 重建
+    python reconstruct_cli.py \
+        --input-image /data/img/ship_001.jpg \
+        --output-dir /data/out/ship_001
+
+    # 语义调整（可以直接用上一步的产物）
+    python trellis/utils/mesh_text_edit.py \
+        --input-obj /data/out/ship_001/sample.obj \
+        --instruction "船头加宽 8%" \
+        --output-dir /data/out/ship_001_edit
+
+9.1 唯一需要另一个环境的情形
+
+只有当需要**重新用 PartField 计算分割**时才需要 torch 2.4 环境。
+日常编辑读取预计算结果（见第 8 节 TRELLIS_PARTFIELD_RESULTS），
+不触发这一步。若确实需要重新分割：
+
+    conda create -y -n partfield python=3.10
+    conda activate partfield
+    pip install torch==2.4.0 torchvision==0.19.0 \
+        --index-url https://download.pytorch.org/whl/cu124
+    pip install lightning==2.2 torch-scatter \
+        -f https://data.pyg.org/whl/torch-2.4.0+cu124.html
+    pip install "setuptools<81" h5py yacs psutil loguru einops plyfile
+
+这是一个可选的维护动作，不是运行前提。
+
+================================================================
+10. 验收自检
+================================================================
+
+    conda activate trellis
+
+    # 接口一致性（参数名、默认值、输出文件是否与接口文档一致）
+    python tools/check_api_contract.py
+    # 期望输出：接口一致性检查：全部通过
+
+    # 重建冒烟测试
+    python reconstruct_cli.py --input-image <任意图片> --output-dir /tmp/smoke
+    # 期望：输出目录含 sample.obj / sample.glb / gaussian.ply /
+    #       mesh_quality.json / log/
+
+    # 语义调整冒烟测试
+    python trellis/utils/mesh_text_edit.py \
+        --input-obj /tmp/smoke/sample.obj \
+        --instruction "船头加宽 5%" --plan
+    # 期望：返回 status=need_region 或候选区域预览，不报错
+
+
+================================================================
+11. 常见问题
+================================================================
+
+Q: conda create 时被杀掉（exit 137）
+A: 内存不足。改用 micromamba，或先 conda clean -a 释放空间。
+
+Q: pip install 很慢或中断
+A: 大文件（torch 等）用国内镜像：
+   pip install -i https://pypi.tuna.tsinghua.edu.cn/simple <包名>
+   但 CUDA 版的 torch 必须从 download.pytorch.org 或
+   https://mirrors.aliyun.com/pytorch-wheels/cu124/ 获取。
+
+Q: ModuleNotFoundError: pkg_resources
+A: setuptools 太新。pip install "setuptools<81"
+
+Q: lightning 报 operator torchvision::nms does not exist
+A: torch 与 torchvision 版本不匹配。成对安装：
+   torch 2.4.0 <-> torchvision 0.19.0；torch 2.1.2 <-> torchvision 0.16.2
+
+Q: 装新包后 torch 被升级，CUDA 突然不可用
+A: pip 重解析了依赖。装包时加 --no-deps：
+   pip install --no-deps <包名>
+   然后用第 3/4 节的 torch 安装命令恢复 torch 与 torchvision。
+
+Q: 语义调整返回 code=5（需要确认区域）
+A: 这是设计行为，不是错误。表示自动定位无法可靠确定方向或部件，
+   需要用户确认朝向或提供区域提示。可先加 --plan 预览候选区域。
+
+Q: 装完重建依赖后，语义调整报 ModuleNotFoundError: pymeshlab
+A: 按 3.4 节补装：pip install --no-deps pymeshlab
+
+Q: 装 pymeshlab 后 numpy 变成 2.x，trimesh 报错
+A: pymeshlab 的 --no-deps 被漏掉。重装 numpy：
+   pip install "numpy==1.26.3"
+
+Q: 语义调整返回 code=9（质量闸门未通过）
+A: 形变会导致翻面、新增开放边或面片面积异常，程序拒绝输出。
+   换更小的幅度，或换更合适的部件/区域。不要用 --no-quality-gate 交付。
+
+
+================================================================
+12. 本文件对应版本
+================================================================
+
+    接口文档   单图目标重建与语义调整算法_命令行接口文档 v2
+    运行环境   单一 conda 环境（Python 3.10, torch 2.1.2+cu121）
+    重建入口   reconstruct_cli.py          参数 8 个
+    语义入口   trellis/utils/mesh_text_edit.py   参数 7 个
+    接口自检   tools/check_api_contract.py
+
+两个入口的参数与本文件描述若与实际 --help 不一致，以 --help 为准，
+并运行 tools/check_api_contract.py 定位差异。

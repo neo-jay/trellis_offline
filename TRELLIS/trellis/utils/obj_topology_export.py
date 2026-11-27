@@ -2,6 +2,10 @@
 
 import numpy as np
 from collections import defaultdict, deque
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 from scipy.spatial import cKDTree
 from trimesh.exchange.obj import export_obj
 
@@ -54,6 +58,63 @@ def _topology_defects(faces):
     return int((counts == 1).sum()), int((counts > 2).sum())
 
 
+def _remove_degenerate_faces(obj_text, vertices, faces, source_uv_faces):
+    """Drop only invalid triangles, keeping every surviving OBJ face line/UV."""
+    if faces.ndim != 2 or faces.shape[1] != 3 or not len(faces):
+        raise ValueError('OBJ geometry must contain triangular faces')
+    if vertices.ndim != 2 or vertices.shape[1] != 3 or not np.isfinite(vertices).all():
+        raise ValueError('OBJ geometry contains invalid vertex coordinates')
+    if faces.min() < 0 or faces.max() >= len(vertices):
+        raise ValueError('OBJ geometry contains invalid face indices')
+    if len(source_uv_faces) != len(faces):
+        raise ValueError('OBJ UV faces do not match geometric faces')
+
+    diagonal = max(float(np.linalg.norm(np.ptp(vertices, axis=0))), 1e-12)
+    points = vertices[faces]
+    double_areas = np.linalg.norm(np.cross(
+        points[:, 1] - points[:, 0], points[:, 2] - points[:, 0]), axis=1)
+    distinct = ((faces[:, 0] != faces[:, 1]) &
+                (faces[:, 1] != faces[:, 2]) &
+                (faces[:, 2] != faces[:, 0]))
+    keep = distinct & (double_areas > diagonal * diagonal * 1e-14)
+    removed = int((~keep).sum())
+    if not removed:
+        return obj_text, faces, source_uv_faces, 0
+    if not keep.any():
+        raise ValueError('OBJ geometry contains no nondegenerate faces')
+
+    # The writer emits one face line per geometric face in the same order.
+    # Preserve all vertex, UV, normal, and material declarations verbatim.
+    lines = obj_text.splitlines(keepends=True)
+    face_lines = [i for i, line in enumerate(lines) if line.startswith('f ')]
+    if len(face_lines) != len(faces):
+        raise ValueError('OBJ text faces do not match geometric faces')
+    for face_index, line_index in reversed(list(enumerate(face_lines))):
+        if not keep[face_index]:
+            del lines[line_index]
+    return ''.join(lines), faces[keep], source_uv_faces[keep], removed
+
+
+def _meshfix_candidate(method, vertices, faces, timeout_sec=180):
+    """Keep MeshFix's native-code failures outside the long-lived web process."""
+    worker = Path(__file__).with_name('meshfix_worker.py')
+    with tempfile.TemporaryDirectory(prefix='trellis_meshfix_') as temp_dir:
+        input_path = Path(temp_dir) / 'input.npz'
+        output_path = Path(temp_dir) / 'output.npz'
+        np.savez(input_path, vertices=vertices, faces=faces.astype(np.int32))
+        try:
+            result = subprocess.run(
+                [sys.executable, str(worker), method, str(input_path), str(output_path)],
+                capture_output=True, text=True, timeout=timeout_sec, check=False)
+        except subprocess.TimeoutExpired:
+            return None, None, f'{method}: native repair timed out after {timeout_sec}s'
+        if result.returncode != 0 or not output_path.is_file():
+            detail = (result.stderr or result.stdout or '').strip()[-500:]
+            return None, None, f'{method}: native repair exited {result.returncode}: {detail}'
+        with np.load(output_path, allow_pickle=False) as data:
+            return np.asarray(data['vertices']), np.asarray(data['faces']), None
+
+
 def close_obj_geometry(mesh, obj_text, vertices, faces, max_removed_ratio=0.05):
     """Conservatively close an OBJ while retaining original textured face UVs.
 
@@ -62,16 +123,23 @@ def close_obj_geometry(mesh, obj_text, vertices, faces, max_removed_ratio=0.05):
     The texture image is never resampled, and unchanged faces keep their
     original UV and normal indices.
     """
-    import pymeshfix
-
     vertices = np.asarray(vertices, dtype=np.float64)
     faces = np.asarray(faces, dtype=np.int64)
+    source_uv_faces = np.asarray(mesh.faces, dtype=np.int64)
     original_boundary, original_nonmanifold = _topology_defects(faces)
     metadata = {
         'method': 'none', 'original_boundary_edges': original_boundary,
         'original_nonmanifold_edges': original_nonmanifold,
     }
-    if original_boundary == 0 and original_nonmanifold == 0:
+    obj_text, faces, source_uv_faces, removed_degenerate = _remove_degenerate_faces(
+        obj_text, vertices, faces, source_uv_faces)
+    metadata['removed_degenerate_faces'] = removed_degenerate
+    if removed_degenerate:
+        metadata['method'] = 'remove_degenerate'
+    boundary_after_cleanup, nonmanifold_after_cleanup = _topology_defects(faces)
+    metadata['cleaned_boundary_edges'] = boundary_after_cleanup
+    metadata['cleaned_nonmanifold_edges'] = nonmanifold_after_cleanup
+    if boundary_after_cleanup == 0 and nonmanifold_after_cleanup == 0:
         return obj_text, vertices, faces, metadata
 
     diagonal = max(float(np.linalg.norm(np.ptp(vertices, axis=0))), 1e-12)
@@ -79,17 +147,7 @@ def close_obj_geometry(mesh, obj_text, vertices, faces, max_removed_ratio=0.05):
     for index, face in enumerate(faces):
         original_keys[tuple(sorted(face))].append(index)
 
-    candidates = []
-    if original_nonmanifold == 0:
-        meshfix = pymeshfix.PyTMesh(False)
-        meshfix.load_array(vertices, faces.astype(np.int32))
-        meshfix.fill_small_boundaries(nbe=0, refine=False)
-        candidates.append(('cap_only', *meshfix.return_arrays()))
-    meshfix = pymeshfix.MeshFix(vertices, faces.astype(np.int32))
-    meshfix.repair(verbose=False, joincomp=False, remove_smallest_components=False)
-    candidates.append(('local_repair', meshfix.v, meshfix.f))
-
-    source_uv_faces = np.asarray(mesh.faces, dtype=np.int64)
+    methods = ['cap_only', 'local_repair'] if nonmanifold_after_cleanup == 0 else ['local_repair']
     preferred_uv = np.zeros(len(vertices), dtype=np.int64)
     assigned = np.zeros(len(vertices), dtype=bool)
     for geometric_face, uv_face in zip(faces, source_uv_faces):
@@ -98,7 +156,13 @@ def close_obj_geometry(mesh, obj_text, vertices, faces, max_removed_ratio=0.05):
                 preferred_uv[geometric_vertex] = uv_vertex
                 assigned[geometric_vertex] = True
 
-    for method, candidate_vertices, candidate_faces in candidates:
+    worker_errors = []
+    for method in methods:
+        candidate_vertices, candidate_faces, worker_error = _meshfix_candidate(
+            method, vertices, faces)
+        if worker_error:
+            worker_errors.append(worker_error)
+            continue
         candidate_vertices = np.asarray(candidate_vertices, dtype=np.float64)
         candidate_faces = np.asarray(candidate_faces, dtype=np.int64)
         if not len(candidate_vertices) or not len(candidate_faces):
@@ -161,4 +225,6 @@ def close_obj_geometry(mesh, obj_text, vertices, faces, max_removed_ratio=0.05):
         return repaired_obj, vertices, mapped_faces, metadata
 
     metadata['reason'] = '未找到满足闭合和形状改动门槛的修复结果'
+    if worker_errors:
+        metadata['native_repair_errors'] = worker_errors
     return obj_text, vertices, faces, metadata

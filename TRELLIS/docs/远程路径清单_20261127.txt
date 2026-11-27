@@ -1,0 +1,205 @@
+TRELLIS 语义尺寸调整 —— 远程路径清单
+================================================================
+
+生成日期: 2026-11-27
+用途: 推送到 GitHub 前的文件核对；部署时的路径参照
+基准目录: /root/TRELLIS   （下面所有相对路径都相对于它）
+
+
+================================================================
+一、需要推送的代码（新增或修改）
+================================================================
+
+A. 重建入口                                               大小
+   reconstruct_cli.py                                  20,010 B
+
+B. 语义调整入口
+   trellis/utils/mesh_text_edit.py                     35,839 B
+
+C. 部件定位（本次新增）
+   trellis/utils/auto_vehicle_parts.py                 15,768 B
+   trellis/utils/semantic_size_support.py              18,795 B
+   trellis/utils/ground_vehicle_parts.py                6,608 B
+   trellis/utils/photo_direction_bridge.py              2,984 B
+   trellis/utils/mesh_intersection_check.py               985 B
+
+D. 网格导出与质量（新增或改）
+   trellis/utils/obj_topology_export.py                11,574 B
+   trellis/utils/meshfix_worker.py                        988 B
+   trellis/representations/mesh/inference_quality.py    7,105 B
+
+E. 工具脚本
+   tools/check_api_contract.py                          7,759 B
+   tools/prepare_part_masks.py                          2,326 B
+   tools/render_size_comparison.py                      1,486 B
+   tools/render_auto_parts_report.py                    2,392 B
+   tools/prepare_real_photos.py                         1,473 B
+   tools/run_real_oblique_reconstruction.py             2,292 B
+
+F. 测试
+   tests/test_mesh_text_edit.py                         8,638 B
+   tests/test_size_precision.py                         5,602 B
+   tests/test_semantic_size_closure.py                  4,426 B
+   tests/test_auto_vehicle_parts.py                     3,649 B
+   tests/test_photo_assisted_ship.py                    2,626 B
+   tests/test_ground_vehicle_edits.py                   2,121 B
+   tests/test_large_vehicle_edits.py                    1,682 B
+   tests/test_photo_direction_mirror.py                 1,433 B
+   tests/inspect_auto_parts.py                            764 B
+   tests/inspect_ground_components.py                     966 B
+
+
+================================================================
+二、不推送的内容
+================================================================
+
+模型权重（体积大，另行分发）
+
+   TRELLIS 主模型        2.9 GB
+   /root/.cache/huggingface/hub/models--JeffreyXiang--TRELLIS-image-large
+
+   DINOv2 权重           1.2 GB
+   /root/.cache/torch/hub/checkpoints/dinov2_vitl14_reg4_pretrain.pth
+
+   u2net 抠图模型        339 MB
+   /root/.u2net/
+
+   PartField 权重         1.2 GB
+   /root/autodl-tmp/PartField/model/model_objaverse.ckpt
+
+Conda 环境（本地重建，不入库）
+
+   /root/miniconda3                            7.3 GB   ← 唯一运行环境
+   /root/autodl-tmp/conda-envs/partfield      11 GB     ← 仅重新分割时用
+
+临时与备份文件（建议写进 .gitignore）
+
+   *.bak_*                    本次修改产生的备份
+   *.bak.*                    历史备份
+   .codex_backup_*/           codex 工作备份
+   .ipynb_checkpoints/
+   __pycache__/
+   clip_f22_right_wing.json   CLIP 验证输出
+   21_smoke_one.py            临时冒烟脚本
+   app_candidate.py           候选 app
+   configs/                   本地配置
+   tmp/
+   lightning_logs/
+
+
+================================================================
+三、部署时的路径约定
+================================================================
+
+程序不要求任何固定绝对路径。以下是默认行为与可覆盖方式。
+
+3.1 代码目录
+
+   默认无要求，放在任意位置。示例：
+       $HOME/projects/TRELLIS
+
+   程序内部用 __file__ 推导自身位置，不依赖 PWD。
+
+3.2 模型缓存（可用环境变量覆盖）
+
+   HF_HOME            默认 $HOME/.cache/huggingface
+                      TRELLIS 主模型放这里
+   TORCH_HOME         默认 $HOME/.cache/torch
+                      DINOv2 权重与代码放这里
+   U2NET_HOME         默认 $HOME/.u2net
+
+3.3 PartField 相关
+
+   TRELLIS_PARTFIELD_RESULTS
+       预计算的分割结果目录。
+       默认探测顺序：
+           1) 该环境变量
+           2) <代码目录同级>/PartField/exp_results
+           3) <代码目录>/partfield_results
+       都找不到时返回不存在的路径，功能降级为“仅用几何定位器”，
+       不会报错退出。
+
+   注意：源码中不存在 TRELLIS_PARTFIELD_MODEL 变量。PartField 权重
+   仅在需要重新计算分割时由外部脚本使用，日常编辑读预计算结果即可。
+
+3.4 照片方向配准
+
+   TRELLIS_PHOTO_PYTHON
+       子进程解释器。默认 sys.executable（即当前运行的 python），
+       所以只要激活了正确环境就不需要设置。
+
+   TRELLIS_PHOTO_DIRECTION_CACHE
+       方向缓存目录。默认系统临时目录下 trellis_photo_direction/，
+       用后即弃；若希望跨任务复用，指向持久目录。
+
+3.5 输出目录
+
+   由调用方通过 --output-dir 指定，程序不设默认值。
+   要求：每次任务使用新的或空的目录，非空会直接报错（code=1）。
+
+
+================================================================
+四、运行环境（单一环境）
+================================================================
+
+本版两个入口共用同一环境：
+
+   基础解释器  /root/miniconda3/bin/python
+   Python      3.10
+   torch       2.1.2+cu121
+   torchvision 0.16.2+cu121
+   numpy       1.26.3
+   包总数      239
+
+重建与语义调整需要的差异依赖：
+
+   重建专属      spconv-cu120, flash-attn, nvdiffrast, kaolin, xatlas
+                 （均已在本环境）
+   语义调整专属  pymeshlab
+                 （已补装，用 --no-deps 避免升级 numpy）
+   两者共用      numpy / scipy / trimesh / pymeshfix / pillow
+
+实测确认（2026-11-27）：
+
+   语义调整 --plan                     code=0
+   语义调整 完整编辑 + 自相交检测       code=0
+   重建                               依赖齐全，因 GPU 下线未跑完整推理
+
+另一个环境 /root/autodl-tmp/conda-envs/partfield（torch 2.4.0+cu124）
+仅在需要重新用 PartField 计算分割时使用，不是日常运行前提。
+
+================================================================
+五、运行时产生的目录（不入库）
+================================================================
+
+   <output-dir>/log/edit.log     语义调整事件日志
+   <output-dir>/log/run.json     同上，结构化
+   <output-dir>/log/recon.log    重建事件日志
+   <output-dir>/log/run.json
+
+   照片方向缓存                  $TMPDIR/trellis_photo_direction/
+   lightning_logs/               训练/推理日志，可删
+
+
+================================================================
+六、推送前自检清单
+================================================================
+
+   [ ] git status 里只有第一节列出的文件是新增或修改
+   [ ] 没有 .bak_* / .codex_backup_* / __pycache__ 被加入
+   [ ] 没有权重文件（*.ckpt / *.pth / *.onnx / *.safetensors）
+   [ ] 没有硬编码 /root 路径：
+           grep -rn "/root/" --include="*.py" . | grep -v "^./tests/"
+       期望：新增模块里只有历史遗留文件命中；本次新增的
+       auto_vehicle_parts.py 与 photo_direction_bridge.py 已改为
+       环境变量 + 相对路径
+   [ ] shebang 不指向 /root：
+           grep -rn "^#!/root/" --include="*.py" .
+       期望：无输出
+   [ ] 接口一致性通过：
+           python tools/check_api_contract.py
+       期望：接口一致性检查：全部通过
+   [ ] 单一环境自洽：两个入口在同一 python 下均可 --help
+           python reconstruct_cli.py --help
+           python trellis/utils/mesh_text_edit.py --help
+   [ ] .gitignore 覆盖第二节列出的临时文件
