@@ -176,7 +176,25 @@ def locate(v,f,request,h,error):
         except ImportError:
             from ground_vehicle_parts import locate_ground
         return locate_ground(v,f,request,h,error)
-    category='ship' if request.target in ('bow','stern','front_hull','hull','deck','mast') else 'aircraft'
+    # --- new-category geometry locators ---
+    # Category per target. New parts are grouped with the class whose body axis
+    # conventions they follow, so the existing axis inference still applies.
+    _SHIPISH = ('bow','stern','front_hull','hull','deck','mast',
+                'sub_bow','sub_stern','sub_hull','conning_tower','periscope',
+                'propeller','skirt')
+    _GROUNDISH = ('ground_front','ground_rear','ground_body','cabin','cargo_bed',
+                  'turret','barrel','tracks','whole_vehicle',
+                  'bus_front','bus_rear','bus_roof','bus_body',
+                  'metro_head','metro_body','metro_door',
+                  'caravan_body','hitch','awning',
+                  'header','auger','agri_cabin',
+                  'launcher','radar_dish','excavator_arm','bucket')
+    if request.target in _SHIPISH:
+        category = 'ship'
+    elif request.target in _GROUNDISH:
+        category = 'car'
+    else:
+        category = 'aircraft'
     frame,evidence,p=infer_frame(v,f,category,h,error)
     if category=='ship' and frame.get('bow_sign',0)==0 and h.get('source_photo'):
         try:
@@ -239,6 +257,27 @@ def locate(v,f,request,h,error):
             prior*=1-smooth((np.abs(v[:,up]-center)-thickness)/max(thickness,1e-12))
             evidence['main_wing_height_center_and_band']=[center,thickness]
         evidence['main_wing_longitudinal_band']=[a/24,(b+1)/24]
+    elif target in ('sub_bow','sub_stern','bus_front','bus_rear','metro_head','launcher'):
+        if not front:
+            raise error('自动定位无法区分前后端；只需一次确认 bow_sign/front_sign',5)
+        # Longitudinal end cut, same construction as bow/stern but without
+        # requiring stern-style taper evidence: these are unambiguous end caps.
+        x = 1-longitudinal if target in ('sub_stern','bus_rear') else longitudinal
+        prior = smooth((x-.70)/.30)
+    elif target in ('conning_tower','periscope','bus_roof','radar_dish'):
+        # Upper longitudinal band, laterally narrow: the tower/dish sits on the
+        # centreline. Both conditions must hold, otherwise a long flat roof
+        # would be selected as a tower.
+        upper = smooth((pos[:,up]-.55)/.35)
+        narrow = smooth((.45-np.abs(pos[:,lat]-.5))/.35)
+        prior = upper*narrow
+    elif target=='skirt':
+        # Lowest band near the outer perimeter of the deck.
+        low = smooth((.30-pos[:,up])/.30)
+        outer = smooth((np.abs(pos[:,lat]-.5)-.20)/.30)
+        prior = low*np.maximum(outer, .15)
+    elif target in ('sub_hull','bus_body','metro_body','caravan_body','agri_body','hull'):
+        raise error('整船体/机身/车厢需 bbox 或部件掩码，不能把上层建筑与附件一起当作主体', 5)
     elif target=='mast':
         if not frame['up_sign']:raise error('桅杆上下方向不明确',5)
         height=pos[:,up] if frame['up_sign']>0 else 1-pos[:,up]

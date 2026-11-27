@@ -32,7 +32,10 @@ from scipy.sparse.csgraph import connected_components
 
 
 AXES = {"x": 0, "y": 1, "z": 2}
-MAX_MAGNITUDE = 0.15
+# Upper bound for a relative size change. Must match semantic_size_support
+# (0.30); it was 0.15 here while the newer parser allowed 0.30, so the same
+# instruction could pass or fail depending on which path handled it.
+MAX_MAGNITUDE = 0.30
 DEFAULT_MAGNITUDE = 0.08
 
 
@@ -306,7 +309,11 @@ def _legacy_plan(data: ObjData, request: EditRequest, region_hint: Optional[Dict
 try:
     from .semantic_size_support import parse as _parse_size, plan as _plan_size
 except ImportError:
-    from semantic_size_support import parse as _parse_size, plan as _plan_size
+    # Support both package import (python -m, tests) and direct script import.
+    try:
+        from .semantic_size_support import parse as _parse_size, plan as _plan_size
+    except ImportError:
+        from semantic_size_support import parse as _parse_size, plan as _plan_size
 
 
 def parse_instruction(instruction, magnitude=None):

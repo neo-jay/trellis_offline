@@ -88,7 +88,25 @@ def locate_ground(v,f,request,h,error):
         evidence.update(barrel_end_band=band,barrel_sign=sign,
                         part_definition='projecting axial cannon candidate; NOT assumed to be vehicle front')
     elif target in ('ground_front','ground_rear','cabin','cargo_bed'):
-        raise error('已识别车辆部件文本，但该部件自动语义定位尚无可靠证据；不会随意裁一段车体代替',5)
+        # Longitudinal end cut plus an optional height band. This is a
+        # positional heuristic, not a learned part segmentation: it assumes the
+        # long axis points from rear to front and that the cab/cargo area sits
+        # above the chassis. Recorded as such in the evidence dict.
+        if not frame.get('front_sign'):
+            raise error('自动定位无法区分车头车尾；只需一次确认 front_sign，无需提供部件区域',5)
+        fs = frame['front_sign']
+        longitudinal = pos[:,long] if fs>0 else 1-pos[:,long]
+        if target in ('ground_front','cabin'):
+            band = smooth((longitudinal-.72)/.28)
+        else:
+            band = smooth((.30-longitudinal)/.30)
+        if target in ('cabin','cargo_bed'):
+            if not frame.get('up_sign'):
+                raise error('驾驶室/货厢需要确认上下方向 up_sign，不猜测',5)
+            upper = smooth((height-.45)/.40)
+            prior = band*upper
+        else:
+            prior = band
     else:raise error('不支持的地面载具部件',5)
     if np.count_nonzero(prior>.5)<20:raise error('未找到足够的目标部件候选',5)
     weights,pf=partfield_refine(v,f,prior,error,target)

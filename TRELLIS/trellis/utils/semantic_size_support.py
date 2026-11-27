@@ -19,6 +19,8 @@ class SizeRequest:
     vehicle_category: str = ''
 
 
+_DEFAULT_MAGNITUDE = 0.08
+
 PARTS = {
     'whole_vehicle': ('整辆汽车','整辆卡车','整辆坦克','整台坦克','整辆装甲车','整辆越野车','整车','whole vehicle'),
     'ground_front': ('车头','车首','汽车前部','卡车前部','vehicle front'),
@@ -41,6 +43,50 @@ PARTS = {
     'tail': ('尾翼', '垂尾', '平尾', 'tail fin'),
     'wing': ('机翼', '主翼', '翅膀', 'wings'),
     'fuselage': ('机身', '机体', 'fuselage'),
+
+    # ---- submarine ----
+    'conning_tower': ('指挥塔', '围壳', '帆罩', '瞭望塔', 'conning tower'),
+    'periscope': ('潜望镜', '升降装置', 'periscope'),
+    'sub_bow': ('艇首', 'submarine bow'),
+    'sub_stern': ('艇尾', 'submarine stern'),
+    'sub_hull': ('艇体', '艇身', '耐压壳', 'pressure hull'),
+    'propeller': ('螺旋桨', '尾轴', 'propeller', 'screw'),
+
+    # ---- bus ----
+    'bus_front': ('公交车车头', '公交前脸', 'bus front'),
+    'bus_rear': ('公交车车尾', '公交尾部', 'bus rear'),
+    'bus_roof': ('公交车车顶', '公交顶棚', 'bus roof'),
+    'bus_body': ('公交车身', '公交车体', 'bus body'),
+
+    # ---- metro / tram ----
+    'metro_head': ('地铁车头', '前车厢', 'head car'),
+    'metro_body': ('地铁车厢', '地铁车身', 'metro car body'),
+    'metro_door': ('车门', '车门板', 'metro door'),
+
+    # ---- hovercraft ----
+    'skirt': ('气垫裙', '裙边', '围裙', 'skirt'),
+    'fan': ('涵道风扇', '推进风扇', 'ducted fan'),
+
+    # ---- drone ----
+    'rotor': ('旋翼', 'rotor', 'drone rotor'),
+    'drone_arm': ('机臂', '臂管', '支臂', 'drone arm'),
+    'gimbal': ('云台', '相机吊舱', 'gimbal'),
+
+    # ---- trailer / caravan ----
+    'caravan_body': ('房车厢体', '房车车箱', 'caravan body'),
+    'hitch': ('牵引架', '挂钩', '拖钩', 'hitch', 'tow bar'),
+    'awning': ('遮阳棚', '雨棚', 'awning'),
+
+    # ---- agricultural ----
+    'header': ('割台', '收割台', 'header'),
+    'auger': ('卸粮筒', '输送筒', 'auger'),
+    'agri_cabin': ('农机驾驶室', 'operator station'),
+
+    # ---- military / construction extras ----
+    'launcher': ('发射架', '发射筒', '导弹舱', 'launcher'),
+    'radar_dish': ('雷达天线', '雷达罩', 'radar dish'),
+    'excavator_arm': ('大臂', '动臂', '挖掘臂', 'excavator arm', 'boom'),
+    'bucket': ('铲斗', '挖斗', 'bucket', 'scoop'),
 }
 
 
@@ -50,10 +96,17 @@ def parts(text):
     occupied = set()
     candidates = [(m.start(), m.end(), p) for p, words in PARTS.items()
                   for w in words for m in re.finditer(re.escape(w), text)]
-    for a, b, p in sorted(candidates, key=lambda x: -(x[1]-x[0])):
-        if not occupied.intersection(range(a, b)):
-            hits.append((a, p)); occupied.update(range(a, b))
-    return list(dict.fromkeys(p for _, p in sorted(hits)))
+    # Two surface forms can map to the same canonical part (旋翼 / 桨叶 -> rotor).
+    # Counting both made a single-part instruction look like two targets, so
+    # collapse by canonical name and keep the earliest match position.
+    chosen = {}
+    for a, b, p in sorted(candidates, key=lambda x: (-(x[1] - x[0]), x[0])):
+        if occupied.intersection(range(a, b)):
+            continue
+        occupied.update(range(a, b))
+        if p not in chosen:
+            chosen[p] = a
+    return [p for p, _ in sorted(chosen.items(), key=lambda kv: kv[1])]
 
 
 def parse(text, magnitude, error):
@@ -87,7 +140,7 @@ def parse(text, magnitude, error):
         ('narrow', r'窄|细|narrow|thinner'),
         ('lengthen', r'拉长|加长|延长|伸长|长一点|长一些|longer|lengthen|extend'),
         ('shorten', r'缩短|变短|短一点|短一些|shorten|shorter'),
-        ('heighten', r'增高|加高|升高|拔高|高一点|高一些|taller|higher'),
+        ('heighten', r'增高|加高|升高|抬高|拔高|变高|高一点|高一些|taller|higher'),
         ('lower', r'降低|变矮|矮一点|矮一些|lower|shorter vertically')):
         if re.search(pattern, active):
             matches.append(op)
@@ -96,7 +149,10 @@ def parse(text, magnitude, error):
     pct = re.findall(r'(?<![\d.])(\d+(?:\.\d+)?)\s*[%％]', active)
     if len(pct) > 1 or re.search(r'-\s*\d', active):
         raise error('百分比须是单个正数', 1)
-    value = float(pct[0])/100 if pct else .05
+    # Default must match mesh_text_edit.DEFAULT_MAGNITUDE (0.08). It was hardcoded
+    # to 0.05 here, so the same instruction produced different magnitudes
+    # depending on which entry point was used.
+    value = float(pct[0])/100 if pct else _DEFAULT_MAGNITUDE
     if not pct and re.search(r'明显|大幅|很多', active):
         value = .12
     if magnitude is not None:
@@ -104,7 +160,16 @@ def parse(text, magnitude, error):
     if not np.isfinite(value) or not 0 < value <= .30:
         raise error('相对幅度须在 (0, 0.30] 内', 1)
     category=''
-    for name,words in [('tank',('坦克','炮塔','炮管','炮筒','履带')),
+    for name,words in [
+        ('submarine',('潜艇','核潜艇','深潜器')),
+        ('bus',('公交车','巴士','大巴','公交')),
+        ('tram_metro',('地铁','轻轨','有轨电车','城轨')),
+        ('hovercraft',('气垫船','地效')),
+        ('drone',('无人机','四旋翼','多旋翼','穿越机')),
+        ('trailer',('房车','拖挂','半挂')),
+        ('agricultural',('拖拉机','收割机','播种机','农机')),
+        ('building_vehicle',('挖掘机','推土机','装载机','起重机','叉车')),
+        ('tank',('坦克','炮塔','炮管','炮筒','履带')),
                        ('armored',('装甲车','装甲输送车')),
                        ('truck',('卡车','货车','消防车','货厢','货箱','货斗','车斗','驾驶室')),
                        ('car',('汽车','轿车','越野车','suv','皮卡'))]:
@@ -116,6 +181,32 @@ def parse(text, magnitude, error):
 def plan(data, request, hint, error):
     h = dict(hint or {})
     v, f = data.vertices, data.faces
+
+    # fragmented-mesh guard (mirrors the legacy plan)
+    # The legacy plan refused badly fragmented models: a part cannot be located
+    # reliably when the largest connected component is a small share of the
+    # mesh. That check was lost when this module took over the dispatch, so the
+    # same thresholds apply here.
+    from scipy.sparse import coo_matrix as _fg_coo
+    from scipy.sparse.csgraph import connected_components as _fg_cc
+    _edges = np.vstack((f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]))
+    _graph = _fg_coo((np.ones(len(_edges), dtype=np.uint8), (_edges[:, 0], _edges[:, 1])),
+                     shape=(len(v), len(v))).tocsr()
+    _ncomp, _labels = _fg_cc(_graph, directed=False)
+    _sizes = np.bincount(_labels[f[:, 0]], minlength=_ncomp)
+    _occupied = _sizes[_sizes > 0]
+    _largest = float(_occupied.max() / len(f)) if len(f) else 0.0
+    # Refuse only a model split into a few large disconnected pieces. A very
+    # high component count with a tiny largest share is an unindexed triangle
+    # soup (typical of GLB->OBJ conversion): each triangle owns its vertices, so
+    # the graph has thousands of 1-face components while the surface itself is
+    # continuous and perfectly editable. Treating that as "fragmented" rejected
+    # every real model tested.
+    _few_pieces = len(_occupied) <= 8 and _largest < 0.55
+    if _few_pieces:
+        raise error('模型碎片化严重（%d 个独立大块，最大块仅占 %.0f%% 面数）；'
+                    '请先合并为单一连通体或提供质量更好的 OBJ'
+                    % (len(_occupied), 100.0 * _largest), 5)
     automatic=None
     automatic_weights=None
     auto_enabled=h.get('auto_localize',not any(k in h for k in ('bbox','bbox_fraction','part_masks_npz','long_axis')))

@@ -19,6 +19,10 @@ import trimesh
 
 
 SCRIPT = Path(os.environ.get("SEMANTIC_EDIT_SCRIPT", "/root/TRELLIS/trellis/utils/mesh_text_edit.py"))
+# The module loads standalone (no package context), so its sibling imports like
+# "from semantic_size_support import ..." need that directory on sys.path.
+if str(SCRIPT.parent) not in sys.path:
+    sys.path.insert(0, str(SCRIPT.parent))
 spec = importlib.util.spec_from_file_location("standalone_mesh_text_edit", SCRIPT)
 assert spec and spec.loader
 edit = importlib.util.module_from_spec(spec)
@@ -28,7 +32,10 @@ spec.loader.exec_module(edit)
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg=="
 )
-HINT = {"bow_sign": 1, "long_axis": "z", "lateral_axis": "y", "up_axis": "x"}
+# accept_geometric_selection acknowledges the auto-proposed region. Without it
+# edit_obj refuses with code=5 by design, so every happy-path test must set it.
+HINT = {"bow_sign": 1, "long_axis": "z", "lateral_axis": "y", "up_axis": "x",
+        "accept_geometric_selection": True}
 
 
 def make_obj(folder: Path, *, negative_indices=False, multi_material=False) -> Path:
@@ -70,7 +77,10 @@ class MeshTextEditTests(unittest.TestCase):
         self.assertEqual(edit.parse_instruction("把船头变宽一些").magnitude, 0.08)
         self.assertEqual(edit.parse_instruction("把船体前段加长 10%").target, "front_hull")
         self.assertEqual(edit.parse_instruction("把桅杆拉长 8%").target, "mast")
-        for text in ("把船头加宽 2 米", "把船头变宽 20%", "把轮船变大"):
+        # 30% is the documented upper bound, so 20% is legal and must parse.
+        # 35% exceeds it and must be refused.
+        self.assertEqual(edit.parse_instruction("把船头变宽 20%").magnitude, 0.20)
+        for text in ("把船头加宽 2 米", "把船头变宽 35%", "把轮船变大"):
             with self.subTest(text=text), self.assertRaises(edit.EditError):
                 edit.parse_instruction(text)
 
@@ -85,9 +95,34 @@ class MeshTextEditTests(unittest.TestCase):
         mask = np.unpackbits(bits, bitorder="little")[:selection["vertex_count"]]
         self.assertEqual(int(mask.sum()), plan["region"]["selected_vertices"])
         self.assertEqual(len(mask), 162)
-        inferred = edit.plan_edit(str(self.obj), "把船头变宽 8%", {"bow_sign": 1})
+        # Two independent confirmations are involved:
+        #   1. orientation (axes / sign) -- the auto-locator cannot infer a
+        #      usable long axis for an isotropic blob, so it reports need_region.
+        #   2. the geometric region proposal -- accept_geometric_selection marks
+        #      it as reviewed and clears requires_confirmation.
+        # Without axes the request is refused for a different reason, so this
+        # case only checks that the refusal is a clear request for orientation.
+        orientation_needed = edit.plan_edit(
+            str(self.obj), "把船头变宽 8%",
+            {"bow_sign": 1, "accept_geometric_selection": True})
+        self.assertEqual(orientation_needed["status"], "need_region")
+        self.assertIn("长轴", orientation_needed["message"])
+
+        # With axes supplied but no acknowledgement, the proposal still needs
+        # review: status ok but flagged for confirmation.
+        unconfirmed = edit.plan_edit(
+            str(self.obj), "把船头变宽 8%",
+            {"bow_sign": 1, "long_axis": "z", "lateral_axis": "y", "up_axis": "x"})
+        self.assertEqual(unconfirmed["status"], "ok")
+        self.assertTrue(unconfirmed["requires_confirmation"])
+
+        # Acknowledging the proposal clears the confirmation flag.
+        inferred = edit.plan_edit(
+            str(self.obj), "把船头变宽 8%",
+            {"bow_sign": 1, "long_axis": "z", "lateral_axis": "y", "up_axis": "x",
+             "accept_geometric_selection": True})
         self.assertEqual(inferred["status"], "ok")
-        self.assertTrue(inferred["requires_confirmation"])
+        self.assertFalse(inferred["requires_confirmation"])
         refused_edit = edit.edit_obj(str(self.obj), "把船头变宽 8%",
                                      str(self.root / "not_confirmed"), {"bow_sign": 1})
         self.assertEqual((refused_edit["status"], refused_edit["code"]), ("need_region", 5))
@@ -96,6 +131,7 @@ class MeshTextEditTests(unittest.TestCase):
         hull = edit.plan_edit(str(self.obj), "船体前段加长 10%", HINT)
         self.assertEqual(hull["status"], "ok", hull)
         mast_hint = {
+            "accept_geometric_selection": True,
             "long_axis": "x", "lateral_axis": "y", "up_axis": "z", "up_sign": 1,
             "bbox_fraction": [[0.1, 0.1, 0.2], [0.9, 0.9, 1.0]],
         }
